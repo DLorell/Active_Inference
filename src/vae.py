@@ -70,21 +70,21 @@ class RecurrentVAE(nn.Module):
         )
 
     def forward(self, x: torch.tensor):
-        state_distribution = self.encoder(x).reshape((-1, 2, self.state_dim))
-        state_mu = nn.LeakyReLU()(state_distribution[:, 0])
-        state_std = nn.ReLU()(state_distribution[:, 1])
-        state_sample = self.sample_normal(state_mu, state_std)
+        state_sufficient_stats = self.encoder(x).reshape((-1, 2, self.state_dim))
+        state_mu = nn.LeakyReLU()(state_sufficient_stats[:, 0])
+        state_var = torch.square(state_sufficient_stats[:, 1])
+        state_covar_mat = torch.diag_embed(state_var)
+        state_dist = torch.distributions.MultivariateNormal(loc=state_mu, covariance_matrix=state_covar_mat)
 
-        observation_distribution = self.decoder(state_sample).reshape((-1, 2, self.observation_dim))
-        obs_mu = nn.LeakyReLU()(observation_distribution[:, 0])
-        obs_std = nn.ReLU()(observation_distribution[:, 1])
-        observation_sample = self.sample_normal(obs_mu, obs_std)
+        state_sample = state_dist.rsample()
 
-        return state_sample, observation_sample
+        obs_sufficient_stats = self.decoder(state_sample).reshape((-1, 2, self.observation_dim))
+        obs_mu = nn.LeakyReLU()(obs_sufficient_stats[:, 0])
+        obs_var = torch.square(obs_sufficient_stats[:, 1])
+        obs_covar_mat = torch.diag_embed(obs_var)
+        obs_dist = torch.distributions.MultivariateNormal(loc=obs_mu, covariance_matrix=obs_covar_mat)
 
-    def sample_normal(self, mu: torch.tensor, std: torch.tensor):
-        std_normal_noise = np.random.standard_normal(np.prod(mu.shape)).reshape(mu.shape)
-        return mu + torch.tensor(std_normal_noise.astype(np.float32)).to(DEVICE) * std
+        return state_sample, state_dist, obs_dist
 
 
 def train(model: RecurrentVAE, dataloader: DataLoader,
@@ -106,7 +106,8 @@ def train(model: RecurrentVAE, dataloader: DataLoader,
 
             SAO = torch.hstack((last_state, last_action, cur_obs))
 
-            sampled_state, sampled_obs = model(SAO)
+            sampled_state, state_dist, obs_dist = model(SAO)
+            sampled_obs = obs_dist.rsample()
 
             # Only train for position reconstruction
             cur_obs = cur_obs[:, 0]
@@ -149,7 +150,8 @@ def eval(model: RecurrentVAE, dataloader: DataLoader, criterion: Loss) -> float:
 
             SAO = torch.hstack((last_state, last_action, cur_obs))
 
-            sampled_state, sampled_obs = model(SAO)
+            sampled_state, state_dist, obs_dist = model(SAO)
+            sampled_obs = obs_dist.rsample()
 
             # Only test for position reconstruction
             cur_obs = cur_obs[:, 0]
@@ -196,7 +198,8 @@ def test(model: RecurrentVAE, criterion: Loss):
 
         SAO = torch.hstack((last_state, last_action, cur_obs))
 
-        sampled_state, sampled_obs = model(SAO)
+        sampled_state, state_dist, obs_dist = model(SAO)
+        sampled_obs = obs_dist.rsample()
 
         # Only test for position reconstruction
         cur_obs = cur_obs[:, 0]
@@ -233,9 +236,9 @@ def main():
     for p in model.parameters():
         p.register_hook(lambda grad: torch.clamp(grad, -1, 1))
 
-    model.load_state_dict(torch.load('models/vae.pth'))
-    test(model, criterion)
-    return
+    #model.load_state_dict(torch.load('models/vae.pth'))
+    #test(model, criterion)
+    #return
 
     avg_mse_train = []
     avg_mse_eval = []
